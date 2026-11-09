@@ -1,0 +1,121 @@
+"""Version-independent, CPU-testable policy validation and weight stream aliasing."""
+import json
+import os
+import re
+from collections import Counter
+from pathlib import Path
+
+EXPERT_NAME = re.compile(
+    r"(?P<prefix>(?:^|\.)layers\.(?P<layer>\d+)\.mlp\.experts\.)(?P<expert>\d+)"
+    r"(?P<suffix>\.(?:gate_proj|up_proj|down_proj)\.weight)$"
+)
+
+
+def read_policy(path):
+    obj = json.loads(Path(path).read_text())
+    entries = obj.get("layers")
+    if not isinstance(entries, list) or len(entries) != 48:
+        raise ValueError("Qwen3-30B-A3B needs exactly 48 entries in policy['layers']")
+    policies = {}
+    for item in entries:
+        layer, cold, warm, hot = [int(item[k]) for k in ("layer", "cold", "warm", "hot")]
+        if layer in policies or not 0 <= layer < 48:
+            raise ValueError("Layer indices must be exactly 0..47 without duplicates")
+        if not (0 <= hot < 32 and 32 <= warm < 64 and 64 <= cold < 96):
+            raise ValueError("For linear EP4: H must be rank0, W rank1, C rank2")
+        if len({hot,warm,cold}) != 3:
+            raise ValueError("H/W/C must be distinct")
+        policies[layer] = dict(item)
+    if set(policies) != set(range(48)):
+        raise ValueError("Missing Qwen3 MoE layers")
+    return policies
+
+
+def remap_weights(weights, policies, audit):
+    """Replace EACH original C weight tensor with a *true* H tensor, during load.
+
+    The destination C's existing physical EP slot receives H's weights, not an
+    additional buffer. The original C weights are omitted. This does not
+    instantiate or copy a second parameter. Upstream loader owns all GPU copies.
+    Checkpoint expert naming must match Qwen3 BF16 (3 matrices / expert).
+    """
+    for name, tensor in weights:
+        match = EXPERT_NAME.search(name)
+        if match is None:
+            yield name, tensor
+            continue
+        layer, expert = int(match["layer"]), int(match["expert"])
+        if layer not in policies:
+            raise RuntimeError(f"Unexpected expert layer {layer}")
+        cfg = policies[layer]
+        if expert == int(cfg["cold"]):
+            audit[(layer,"cold_skipped")] += 1
+            continue
+        yield name, tensor
+        if expert == int(cfg["hot"]):
+            # The vLLM weight loader maps the synthetic C name into its local
+            # resident slot on EP rank 2. On other ranks, the expert map skips it.
+            new_name = (name[:match.start("expert")] + str(cfg["cold"]) +
+                        name[match.end("expert"):])
+            audit[(layer,"hot_aliased_into_c")] += 1
+            yield new_name, tensor
+
+
+def validate_audit(audit, num_layers=48):
+    for layer in range(num_layers):
+        for key in ("cold_skipped", "hot_aliased_into_c"):
+            n = audit[(layer,key)]
+            if n != 3:
+                raise RuntimeError(
+                    f"Incomplete Qwen3 BF16 weight replacement layer={layer} "
+                    f"{key}={n} != 3. Abort rather than use uninitialized weights."
+                )
+
+
+
+def apply_expert_redirects(topk_ids, router_logits, cold, warm, hot, *, replicate=True):
+    """Redirect C -> W and some H assignments -> H replica in C slot."""
+    import torch
+    import os
+
+    original = topk_ids
+    chosen_c = original == cold
+
+    # Step 1: Cold -> Warm
+    new_ids = torch.where(chosen_c, warm, original)
+
+    if replicate:
+        e = router_logits.shape[-1]
+        a, b = (hot + 13) % e, (hot + 37) % e
+
+        # Step 2: Split Hot expert assignments
+        shard_mask = (
+            router_logits[:, a] > router_logits[:, b]
+        ).unsqueeze(1)
+
+        replica_mask = (original == hot) & shard_mask
+        new_ids = torch.where(replica_mask, cold, new_ids)
+
+        # DEBUG ONLY: count routing assignments
+        if os.environ.get("CWH_TRACE_ROUTING") == "1":
+            count = getattr(apply_expert_redirects, "_trace_count", 0)
+
+            if count < 30:
+                h_before = (original == hot).sum().item()
+                h_replica = replica_mask.sum().item()
+                h_remaining = (new_ids == hot).sum().item()
+                c_redirected = chosen_c.sum().item()
+
+                print(
+                    f"CWH ROUTING AUDIT pid={os.getpid()} "
+                    f"H_before={h_before} "
+                    f"H_replica={h_replica} "
+                    f"H_remaining={h_remaining} "
+                    f"C_redirected={c_redirected}",
+                    flush=True,
+                )
+
+                apply_expert_redirects._trace_count = count + 1
+
+    return new_ids
+

@@ -1,0 +1,2 @@
+[vllm.general_plugins]
+cwh_v4 = cwh_v4.plugin:register

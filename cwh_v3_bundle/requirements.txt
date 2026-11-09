@@ -1,0 +1,4 @@
+# Use the user's existing vllm/vllm-openai:v0.13.0 image, do NOT upgrade its torch.
+# Expected original environment: torch 2.9.0+cu129 / CUDA 12.9 / vLLM 0.13.0.
+# The image supplies: torch, triton, numpy, transformers, safetensors.
+# Scripts outside GPU execution need only Python 3.10+ and NumPy.

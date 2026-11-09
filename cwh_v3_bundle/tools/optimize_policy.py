@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Decode-calibrated selective CWH. NumPy replay, exact hash routing per call.
+
+Optimize mean per-call max assignments on train; accept the ONE chosen candidate
+only if it generalizes to validation. No test workload or QA labels are used.
+Assignments are a cost proxy; formal speed must still be measured.
+"""
+import argparse
+import json
+from pathlib import Path
+import numpy as np
+import time
+from durable import atomic_json
+from cwh_v2.policy import salt_for
+
+GRID = (.25, .5, .75, 1.)
+
+
+def masks(n, salt):
+    x = np.arange(n, dtype=np.uint32) + np.uint32(salt)
+    x = (x ^ (x >> np.uint32(16))) * np.uint32(0x7feb352d)
+    x = (x ^ (x >> np.uint32(15))) * np.uint32(0x846ca68b)
+    h = (x ^ (x >> np.uint32(16))) & np.uint32(0xffffff)
+    return [h < int(p * (1 << 24)) for p in GRID]
+
+
+class Replay:
+    def __init__(self, path):
+        counts = {'decode': [], 'prefill': []}
+        moves = {'decode': [], 'prefill': []}
+        all_counts=[]
+        real_counts=[]
+        self.prefix_decode=[]
+        self.phase_indices={'decode':[],'prefill':[]}
+        for line in path.read_text().split('\n'):
+            if not line.strip(): continue
+            r = json.loads(line)
+            ids = np.asarray(r['ids'], dtype=int)
+            decode = np.asarray(r['decode'], dtype=bool)
+            ri=len(all_counts)
+            real_counts.append(np.bincount(ids.ravel(),minlength=128))
+            padding=np.asarray(r.get('padding_ids',[]),dtype=int).reshape(-1,ids.shape[1])
+            flat=np.concatenate((ids,padding)).ravel()
+            all_counts.append(np.bincount(flat,minlength=128))
+            flat_decode=np.repeat(np.r_[decode,np.zeros(len(padding),dtype=bool)],ids.shape[1])
+            self.prefix_decode.append({int(h):np.r_[0,np.cumsum(flat_decode[flat==h])]
+                                       for h in np.unique(flat)})
+            fractions = masks(len(ids), salt_for(r['layer'], r['call']))
+            for phase, selected in (('decode', decode), ('prefill', ~decode)):
+                if not selected.any():
+                    continue
+                self.phase_indices[phase].append(ri)
+                counts[phase].append(np.bincount(ids[selected].ravel(), minlength=128))
+                moves[phase].append([np.bincount(ids[selected & m].ravel(), minlength=128) for m in fractions])
+        self.counts = {p: np.asarray(v, dtype=float).reshape(-1, 128) for p,v in counts.items()}
+        self.moves = {p: np.asarray(v, dtype=float).reshape(-1, 4, 128) for p,v in moves.items()}
+        if not len(self.counts['decode']) or not len(self.counts['prefill']):
+            raise RuntimeError('Need both real decode and prefill samples')
+        self.loads = {p: v.reshape(-1,4,32).sum(-1) for p,v in self.counts.items()}
+        self.all_counts=np.asarray(all_counts,dtype=np.int64)
+        self.real_counts=np.asarray(real_counts,dtype=np.int64)
+
+    def dynamic_gains(self,c,w,h,gain_bp=100):
+        whole=self.all_counts.reshape(-1,4,32).sum(-1).copy()
+        whole[:,c//32]-=self.all_counts[:,c]
+        whole[:,w//32]+=self.all_counts[:,c]
+        a,b=whole[:,h//32],whole[:,c//32]
+        other=whole[:,[g for g in range(4) if g not in (h//32,c//32)]].max(1)
+        peak=whole.max(1)
+        target=np.maximum.reduce([other,(a+b+1)//2,a-self.all_counts[:,h],b])
+        m=np.maximum(0,a-target)
+        m=np.where(((peak-target)>=1)&((peak-target)*10000>=gain_bp*peak),m,0)
+        md=np.array([self.prefix_decode[i].get(h,np.array([0]))[int(v)] for i,v in enumerate(m)])
+        gains={}
+        real_m=np.minimum(m,self.real_counts[:,h])
+        for phase,moved in [('decode',md),('prefill',real_m-md)]:
+            before=self.loads[phase]
+            after=before.copy()
+            cold=self.counts[phase][:,c]
+            after[:,c//32]-=cold;after[:,w//32]+=cold
+            cw_peak=after.max(1).mean()
+            move=moved[self.phase_indices[phase]]
+            after[:,h//32]-=move;after[:,c//32]+=move
+            original=before.max(1);final=after.max(1)
+            gains[phase]=float(1-final.mean()/original.mean())
+            gains[phase+'_replica_increment']=float(1-final.mean()/cw_peak)
+            gains[phase+'_p95_regression']=float(np.percentile(final/original-1,95))
+        return gains
+
+    def gains(self, c, w, h, pi):
+        gains = {}
+        for phase in ('decode', 'prefill'):
+            before = self.loads[phase]
+            after = before.copy()
+            cold = self.counts[phase][:,c]
+            hot = self.moves[phase][:,pi,h]
+            after[:,c//32] -= cold
+            after[:,w//32] += cold
+            cw_peak=after.max(1).mean()
+            after[:,h//32] -= hot
+            after[:,c//32] += hot
+            if not np.allclose(after.sum(1), before.sum(1)) or (after < 0).any():
+                raise AssertionError('Assignment conservation violated')
+            original = before.max(1)
+            final = after.max(1)
+            gains[phase] = float(1 - final.mean() / original.mean())
+            gains[phase+'_replica_increment'] = float(1-final.mean()/cw_peak)
+            gains[phase+'_p95_regression'] = float(np.percentile(final / original - 1, 95))
+        return gains
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--capture', type=Path, required=True)
+    p.add_argument('--pairs', type=Path, required=True)
+    p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--min-gain', type=float, default=.02)
+    p.add_argument('--dispatch',choices=['dynamic','static'],default='dynamic')
+    p.add_argument('--online-gain-bp',type=int,default=100)
+    p.add_argument('--min-replica-gain',type=float,default=.005)
+    p.add_argument('--max-pair-error', type=float, default=.10,
+                   help='router-weighted full-layer reconstruction RMS fraction, NOT expert cosine')
+    p.add_argument('--max-cold-mass', type=float, default=.01)
+    p.add_argument('--deadline',type=float,default=0)
+    p.add_argument('--checkpoint',type=Path)
+    a = p.parse_args()
+    pair_data = json.loads(a.pairs.read_text())['layers']
+    policy = dict(schema=2, selection='train only; one candidate per layer, validation acceptance',
+                  objective='mean of PER-CALL max GPU assignments; not measured GPU time',
+                  thresholds=vars(a) | dict(capture=str(a.capture), pairs=str(a.pairs), out=str(a.out)), layers=[])
+    checkpoint=a.checkpoint or a.out.with_suffix('.partial.json')
+    if checkpoint.exists():policy=json.loads(checkpoint.read_text())
+    for l in range(48):
+        if l<len(policy['layers']):
+            if policy['layers'][l]['layer']!=l:raise RuntimeError('Optimizer checkpoint layer ordering corrupt')
+            continue
+        if a.deadline and time.time()+180>a.deadline:raise SystemExit(75)
+        train = Replay(a.capture / f'train_layer{l:02d}.jsonl')
+        val = Replay(a.capture / f'validation_layer{l:02d}.jsonl')
+        counts = train.counts['decode'].sum(0)
+        hot = [int(g*32+i) for g in range(4) for i in np.argsort(counts[g*32:(g+1)*32])[-3:]]
+        eligible = [x for x in pair_data[str(l)] if x['relative_layer_rms_error'] <= a.max_pair_error
+                    and x['decode_mass_fraction'] <= a.max_cold_mass]
+        best = None
+        for pair in eligible:
+            c, w = pair['cold'], pair['warm']
+            for h in hot:
+                if h in (c,w) or h//32 == c//32:
+                    continue
+                for pi, frac in (enumerate(GRID) if a.dispatch=='static' else [(None,.5)]):
+                    gains = (train.gains(c,w,h,pi) if a.dispatch=='static' else
+                             train.dynamic_gains(c,w,h,a.online_gain_bp))
+                    if (gains['prefill'] < -.02 or gains['decode_p95_regression'] > .1
+                        or gains['decode_replica_increment'] < a.min_replica_gain):
+                        continue
+                    if best is None or gains['decode'] > best['train_proxy']['decode']:
+                        best = dict(layer=l, cold=c, warm=w, hot=h, replica_fraction=frac,
+                                    runtime_dispatch=a.dispatch,online_gain_bp=a.online_gain_bp,
+                                    quality_proxy=pair, train_proxy=gains)
+        cfg = dict(layer=l, enabled=False, reason='no quality-admissible train candidate')
+        if best is not None:
+            if a.dispatch=='dynamic':
+                c,w,h=(best[k] for k in ('cold','warm','hot'))
+                best['replica_fraction']=max(GRID,key=lambda f:train.gains(c,w,h,GRID.index(f))['decode'])
+                gains=val.dynamic_gains(c,w,h,a.online_gain_bp)
+            else:
+                gains = val.gains(best['cold'], best['warm'], best['hot'], GRID.index(best['replica_fraction']))
+            ok = (best['train_proxy']['decode'] >= a.min_gain and gains['decode'] >= a.min_gain
+                  and gains['decode_replica_increment'] >= a.min_replica_gain
+                  and gains['prefill'] >= -.02 and gains['decode_p95_regression'] <= .1)
+            cfg = best | dict(enabled=bool(ok), validation_proxy=gains,
+                              reason='accepted' if ok else 'native fallback: proxy gain not robust')
+        policy['layers'].append(cfg)
+        atomic_json(checkpoint,policy)
+        print('SELECT', l, cfg['enabled'], cfg.get('validation_proxy'), flush=True)
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(a.out,policy)
+    print('ACTIVE', sum(x['enabled'] for x in policy['layers']), '/ 48')
+
+
+if __name__ == '__main__':
+    main()

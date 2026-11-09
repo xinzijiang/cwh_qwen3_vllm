@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Fail closed on slot hashes or cross-rank capture disagreement."""
+import argparse
+import json
+from pathlib import Path
+
+
+def check_weights(root):
+    records = [json.loads((root / f'rank{r}.json').read_text()) for r in range(4)]
+    if len({r['policy_sha256'] for r in records}) != 1:
+        raise RuntimeError('Workers used different policies')
+    expected = records[0]['active_layers']
+    slots = {}
+    for r in records:
+        for x in r['tensor_hashes']:
+            slots.setdefault((x['layer'], x['parameter']), {})[x['kind']] = (x['sha256'], x['shape'])
+    if len(slots) != expected * 2:
+        raise RuntimeError('Missing H / replica parameter hashes')
+    for k, v in slots.items():
+        if set(v) != {'H', 'replica'} or v['H'] != v['replica']:
+            raise RuntimeError(f'Replica weights differ: {k}')
+    return dict(active_layers=expected, matched_fused_tensors=len(slots), equal=True)
+
+
+def check_capture(root):
+    ranks = []
+    for r in range(4):
+        path = root / f'fingerprint_rank{r}.jsonl'
+        rows = [json.loads(s) for s in path.read_text().split('\n') if s.strip()]
+        d = {(x['split'], x['layer'], x['call']):(x['digest'], x['rows']) for x in rows}
+        if len(d) != len(rows):
+            raise RuntimeError('Duplicate capture keys; use a new empty output directory')
+        ranks.append(d)
+    if not ranks[0] or any(x != ranks[0] for x in ranks[1:]):
+        raise RuntimeError('Callback routing inputs differ across EP ranks: cannot deduplicate EP0')
+    for split in {k[0] for k in ranks[0]}:
+        for l in range(48):
+            if not any(k[0] == split and k[1] == l for k in ranks[0]):
+                raise RuntimeError(f'Missing {split} layer {l}')
+    return dict(equal=True, fingerprint_keys=len(ranks[0]))
+
+
+if __name__ == '__main__':
+    p = argparse.ArgumentParser()
+    p.add_argument('kind', choices=['weights', 'capture'])
+    p.add_argument('directory', type=Path)
+    a = p.parse_args()
+    print(json.dumps(check_weights(a.directory) if a.kind == 'weights' else check_capture(a.directory)))

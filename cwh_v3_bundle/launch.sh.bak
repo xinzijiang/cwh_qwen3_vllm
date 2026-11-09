@@ -1,0 +1,29 @@
+#!/bin/bash
+# Run on the host shell INSIDE an active salloc, or from the supplied batch job.
+set -Eeuo pipefail
+STAGE="${1:-focus}"
+TAG="${2:?Usage: bash launch.sh STAGE TAG [budget-minutes]}"
+BUDGET="${3:-220}"
+[[ -n "${SLURM_JOB_ID:-}" ]] || { echo 'First obtain a GPU allocation with salloc, or use nersc.sbatch'; exit 2; }
+PACK_HOST="$SCRATCH/cwh_qwen3_vllm/cwh_v3_bundle"
+[[ -d "$PACK_HOST" ]] || { echo "Missing $PACK_HOST"; exit 3; }
+JOB_RECORD="$(scontrol show job "$SLURM_JOB_ID" -o)"
+export CWH_JOB_RECORD="$JOB_RECORD" CWH_REQUEST_MINUTES="$BUDGET"
+export CWH_SAFE_DEADLINE="$(python3 - <<'PY'
+import datetime,os,re,time
+now=time.time();budget=int(os.environ['CWH_REQUEST_MINUTES'])*60
+m=re.search(r'\bEndTime=([^ ]+)',os.environ['CWH_JOB_RECORD'])
+if not m or m[1] in ('Unknown','None'):raise SystemExit('Cannot determine Slurm EndTime')
+end=datetime.datetime.fromisoformat(m[1]).timestamp()
+deadline=min(now+budget,end-180)
+if deadline<=now+120:raise SystemExit('Too little allocation time remains; obtain a new allocation')
+print(int(deadline))
+PY
+)"
+[[ "$CWH_SAFE_DEADLINE" =~ ^[0-9]+$ ]] || { echo 'Invalid safe deadline; no job launched'; exit 4; }
+unset CWH_JOB_RECORD CWH_REQUEST_MINUTES
+export CWH_STAGE="$STAGE" CWH_TAG="$TAG" CWH_BUDGET="$BUDGET"
+srun -n 1 -G 4 --gpu-bind=none \
+  shifter --image=docker:vllm/vllm-openai:v0.13.0 --module=gpu \
+  --volume="$SCRATCH:/work" \
+  bash /work/cwh_qwen3_vllm/cwh_v3_bundle/inside.sh

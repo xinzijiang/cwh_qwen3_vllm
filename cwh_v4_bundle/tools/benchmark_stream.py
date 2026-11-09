@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Constant-concurrency streaming benchmark; stdlib-only HTTP; request-level CSV + summary JSON.
+
+TTFT/TPOT are CLIENT-SIDE streaming approximations (time to first text / mean subsequent
+completion token interval). No throughput from separate accuracy runs is mixed in.
+"""
+import argparse
+import concurrent.futures
+import csv
+import json
+import math
+import pathlib
+import random
+import statistics
+import threading
+import time
+import urllib.error
+import urllib.request
+from durable import append_jsonl,atomic_json
+
+
+def percentile(vals, q):
+    if not vals:
+        return None
+    xs=sorted(vals)
+    k=(len(xs)-1)*q/100.0
+    lo=int(math.floor(k)); hi=int(math.ceil(k))
+    return xs[lo] if lo==hi else xs[lo]*(hi-k)+xs[hi]*(k-lo)
+
+
+def one_request(url, model, record, output_tokens, timeout):
+    sent=time.perf_counter()
+    payload={"model":model, "prompt":record["prompt"], "max_tokens":output_tokens,
+             "temperature":0, "seed":20261103, "ignore_eos":True, "stream":True,
+             "stream_options":{"include_usage":True}}
+    req=urllib.request.Request(url+"/v1/completions", data=json.dumps(payload).encode(),
+                               headers={"Content-Type":"application/json"}, method="POST")
+    first_token=None
+    last_token=None
+    usage=None
+    chunks=0
+    finish=None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            while True:
+                line=response.readline()
+                if not line:
+                    break
+                now=time.perf_counter()
+                if not line.startswith(b"data: "):
+                    continue
+                data=line[6:].strip()
+                if data == b"[DONE]":
+                    break
+                if not data:
+                    continue
+                chunk=json.loads(data.decode("utf-8"))
+                if chunk.get("usage"):
+                    usage=chunk["usage"]
+                for choice in chunk.get("choices",[]):
+                    if choice.get("finish_reason"):
+                        finish=choice["finish_reason"]
+                    if choice.get("text"):
+                        chunks += 1
+                        if first_token is None:
+                            first_token=now
+                        last_token=now
+        end=time.perf_counter()
+        # vLLM should include usage with stream_options. If absent and finish is
+        # length, the requested fixed-output token count is known exactly.
+        tokens=usage.get("completion_tokens") if usage else (output_tokens if finish=="length" else None)
+        if tokens != output_tokens or finish != 'length' or first_token is None:
+            raise RuntimeError(f"No reliable completion token usage (usage={usage}, finish={finish}, chunks={chunks})")
+        return {"request_id":record.get("request_id",""),
+                "input_tokens":record.get("input_tokens",""),
+                "output_tokens":int(tokens), "duration_s":end-sent,
+                "ttft_ms":1000*(first_token-sent),
+                "tpot_ms":1000*(last_token-first_token)/(tokens-1),
+                "finish_reason":finish or "", "stream_chunks":chunks,
+                "error":""}
+    except Exception as e:
+        return {"request_id":record.get("request_id",""),
+                "input_tokens":record.get("input_tokens",""),"output_tokens":0,
+                "duration_s":time.perf_counter()-sent,"ttft_ms":"","tpot_ms":"",
+                "finish_reason":"","stream_chunks":chunks,
+                "error":type(e).__name__+": "+str(e)[:400]}
+
+
+def main():
+    p=argparse.ArgumentParser()
+    p.add_argument("--base-url", default="http://127.0.0.1:8765")
+    p.add_argument("--model",default="qwen3-moe")
+    p.add_argument("--workload",required=True)
+    p.add_argument("--mode",required=True)
+    p.add_argument("--concurrency",type=int,default=16)
+    p.add_argument("--output-tokens",type=int,default=256)
+    p.add_argument("--repeat",type=int,default=0)
+    p.add_argument("--warmup",type=int,default=8)
+    p.add_argument("--seed",type=int,default=20261102)
+    p.add_argument("--timeout",type=int,default=1200)
+    p.add_argument("--output-prefix",required=True)
+    p.add_argument("--trace-marker",default="")
+    p.add_argument("--marker-value",default="trace")
+    p.add_argument('--journal',default='')
+    p.add_argument("--warmup-rounds",type=int,default=2)
+    p.add_argument("--warmup-tokens",type=int,default=64)
+    a=p.parse_args()
+    if a.concurrency < 1: raise ValueError("concurrency must be positive")
+    work=[json.loads(x) for x in pathlib.Path(a.workload).read_text().split('\n') if x.strip()]
+    if not work: raise ValueError("empty workload")
+    rng=random.Random(a.seed+a.repeat)
+    rng.shuffle(work)
+    out=pathlib.Path(a.output_prefix)
+    out.parent.mkdir(parents=True,exist_ok=True)
+    print("WARMUP", a.mode, a.workload, "requests", a.warmup, flush=True)
+    for warm_round in range(a.warmup_rounds):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
+            futures=[pool.submit(one_request,a.base_url,a.model,rec,min(a.warmup_tokens,a.output_tokens),a.timeout)
+                     for rec in work[:a.warmup]]
+            for future in concurrent.futures.as_completed(futures):
+                r=future.result()
+                if r["error"]:raise RuntimeError("Warmup failed: "+r["error"])
+        print("WARMUP_ROUND",warm_round+1,"/",a.warmup_rounds,flush=True)
+    marker=pathlib.Path(a.trace_marker) if a.trace_marker else None
+    if marker:
+        marker.parent.mkdir(parents=True,exist_ok=True)
+        marker.write_text(a.marker_value+"\n")
+    print("BENCH_START",a.mode, "workload",a.workload,"repeat",a.repeat,
+          "concurrency",a.concurrency,"requests",len(work),flush=True)
+    completed=0
+    results=[]
+    start=time.perf_counter()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
+            futures=[pool.submit(one_request,a.base_url,a.model,r,a.output_tokens,a.timeout) for r in work]
+            for future in concurrent.futures.as_completed(futures):
+                res=future.result()
+                results.append(res)
+                append_jsonl(a.journal or out.with_suffix('.requests.jsonl'),res)
+                completed+=1
+                if completed % 100 == 0:
+                    print("PROGRESS",a.mode,a.repeat,completed,"/",len(work),flush=True)
+    finally:
+        if marker and marker.exists(): marker.unlink()
+    wall=time.perf_counter()-start
+    fields=["request_id","input_tokens","output_tokens","duration_s","ttft_ms",
+            "tpot_ms","finish_reason","stream_chunks","error"]
+    with out.with_suffix(".csv").open("w",newline="") as f:
+        writer=csv.DictWriter(f,fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(results)
+    successes=[x for x in results if not x["error"]]
+    failures=[x for x in results if x["error"]]
+    toks=sum(x["output_tokens"] for x in successes)
+    ttft=[float(x["ttft_ms"]) for x in successes]
+    tpot=[float(x["tpot_ms"]) for x in successes]
+    summary={"mode":a.mode,"workload":pathlib.Path(a.workload).stem,"repeat":a.repeat,
+             "concurrency":a.concurrency,"request_count":len(work),
+             "success_count":len(successes),"error_count":len(failures),
+             "total_output_tokens":toks,"wall_s":wall,
+             "output_tokens_per_s":toks/wall if wall else 0,
+             "median_ttft_ms":percentile(ttft,50),"p95_ttft_ms":percentile(ttft,95),
+             "median_tpot_ms":percentile(tpot,50),"p95_tpot_ms":percentile(tpot,95),
+             "warmup_requests_per_round":a.warmup,"warmup_rounds":a.warmup_rounds,"warmup_tokens":a.warmup_tokens,
+             "client_measurement":True,"trace_enabled":bool(marker),
+             "error_examples":[r["error"] for r in failures[:4]]}
+    atomic_json(out.with_suffix('.json'),summary)
+    print("BENCH_RESULT",json.dumps(summary),flush=True)
+    if failures:
+        raise SystemExit(f"{len(failures)}/{len(work)} HTTP requests failed; benchmark mode invalid")
+
+if __name__=="__main__":main()

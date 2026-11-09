@@ -1,0 +1,10 @@
+{
+  "version": "4.0.0",
+  "cpu_tests_passed": 25,
+  "python_compile": "passed",
+  "shell_syntax": "passed",
+  "host_python36_syntax": "passed for status/verify and launch time parser uses compatible stdlib",
+  "cuda_tests": "NOT_RUN: no CUDA device in authoring environment",
+  "perlmutter_end_to_end": "NOT_RUN",
+  "speedup_claim": null
+}

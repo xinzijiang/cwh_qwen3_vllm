@@ -1,0 +1,39 @@
+# Experiment data
+runs/
+data/
+data_vendor/
+build/
+previous/
+large_ablation_v1/
+debug_probe/
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# Logs
+*.log
+*.out
+*.err
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Model weights
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# Temporary files
+*.tmp
+*.lock
+
+# Environments
+.venv/
+venv/
+env/

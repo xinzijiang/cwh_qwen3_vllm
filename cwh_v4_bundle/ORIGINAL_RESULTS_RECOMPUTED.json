@@ -1,0 +1,299 @@
+{
+  "performance": {
+    "native_ep": {
+      "short": {
+        "repeats": [
+          328.45837557548106,
+          330.06797814197125,
+          336.9745744526811
+        ],
+        "mean": 331.8336427233778,
+        "sample_sd": 4.524333032561932
+      },
+      "long": {
+        "repeats": [
+          337.4029144602729,
+          331.65031219779985,
+          336.71560576847776
+        ],
+        "mean": 335.2562774755168,
+        "sample_sd": 3.141709327345491
+      },
+      "quality": {
+        "mode": "native_ep",
+        "dataset": "OpenBookQA validation",
+        "questions": 500,
+        "correct": 405,
+        "accuracy_pct": 81.0,
+        "error_count": 0,
+        "evaluation_definition": "same fixed A/B/C/D prompt; allowed_token_ids and max_tokens=1",
+        "letter_token_ids": [
+          362,
+          425,
+          356,
+          422
+        ],
+        "not_a_throughput_benchmark": true
+      }
+    },
+    "eplb4": {
+      "short": {
+        "repeats": [
+          270.3278290145223,
+          270.2359524076856,
+          269.22218398134237
+        ],
+        "mean": 269.92865513451676,
+        "sample_sd": 0.6135441674579117
+      },
+      "long": {
+        "repeats": [
+          278.72984422873367,
+          271.2630586375794,
+          266.4547305661396
+        ],
+        "mean": 272.14921114415085,
+        "sample_sd": 6.185349913794551
+      },
+      "quality": {
+        "mode": "eplb4",
+        "dataset": "OpenBookQA validation",
+        "questions": 500,
+        "correct": 410,
+        "accuracy_pct": 82.0,
+        "error_count": 0,
+        "evaluation_definition": "same fixed A/B/C/D prompt; allowed_token_ids and max_tokens=1",
+        "letter_token_ids": [
+          362,
+          425,
+          356,
+          422
+        ],
+        "not_a_throughput_benchmark": true
+      }
+    },
+    "cw_only": {
+      "short": {
+        "repeats": [
+          320.0910114347701,
+          320.68914546279507,
+          319.1978295265622
+        ],
+        "mean": 319.9926621413758,
+        "sample_sd": 0.7505066575646735
+      },
+      "long": {
+        "repeats": [
+          321.2096425386111,
+          320.2191977226094,
+          323.6052408463445
+        ],
+        "mean": 321.678027035855,
+        "sample_sd": 1.7409365401680268
+      },
+      "quality": {
+        "mode": "cw_only",
+        "dataset": "OpenBookQA validation",
+        "questions": 500,
+        "correct": 419,
+        "accuracy_pct": 83.8,
+        "error_count": 0,
+        "evaluation_definition": "same fixed A/B/C/D prompt; allowed_token_ids and max_tokens=1",
+        "letter_token_ids": [
+          362,
+          425,
+          356,
+          422
+        ],
+        "not_a_throughput_benchmark": true
+      }
+    },
+    "cwh_full": {
+      "short": {
+        "repeats": [
+          293.8859887953601,
+          297.41993654021,
+          293.33123704173397
+        ],
+        "mean": 294.87905412576805,
+        "sample_sd": 2.2178818634123005
+      },
+      "long": {
+        "repeats": [
+          304.04368241791633,
+          305.69769279997996,
+          306.0857043515641
+        ],
+        "mean": 305.2756931898201,
+        "sample_sd": 1.0844473927332512
+      },
+      "quality": {
+        "mode": "cwh_full",
+        "dataset": "OpenBookQA validation",
+        "questions": 500,
+        "correct": 418,
+        "accuracy_pct": 83.6,
+        "error_count": 0,
+        "evaluation_definition": "same fixed A/B/C/D prompt; allowed_token_ids and max_tokens=1",
+        "letter_token_ids": [
+          362,
+          425,
+          356,
+          422
+        ],
+        "not_a_throughput_benchmark": true
+      }
+    }
+  },
+  "paired_quality": {
+    "native_ep vs eplb4": {
+      "predictions_differ": 25,
+      "left_only_correct": 7,
+      "right_only_correct": 12,
+      "exact_mcnemar_p": 0.359283447265625
+    },
+    "native_ep vs cw_only": {
+      "predictions_differ": 32,
+      "left_only_correct": 4,
+      "right_only_correct": 18,
+      "exact_mcnemar_p": 0.004343509674072266
+    },
+    "native_ep vs cwh_full": {
+      "predictions_differ": 31,
+      "left_only_correct": 5,
+      "right_only_correct": 18,
+      "exact_mcnemar_p": 0.010622024536132812
+    },
+    "eplb4 vs cw_only": {
+      "predictions_differ": 26,
+      "left_only_correct": 4,
+      "right_only_correct": 13,
+      "exact_mcnemar_p": 0.049041748046875
+    },
+    "eplb4 vs cwh_full": {
+      "predictions_differ": 25,
+      "left_only_correct": 4,
+      "right_only_correct": 12,
+      "exact_mcnemar_p": 0.076812744140625
+    },
+    "cw_only vs cwh_full": {
+      "predictions_differ": 15,
+      "left_only_correct": 5,
+      "right_only_correct": 4,
+      "exact_mcnemar_p": 1.0
+    }
+  },
+  "trace": {
+    "samples": 4848,
+    "all_four_rank_records_equal": true,
+    "h_to_replica": 5925,
+    "cold_redirect": 7525,
+    "duplicates": 593,
+    "warning": "Old trace has no scheduler phase metadata; row-count groups are proxies only.",
+    "all": {
+      "native": {
+        "aggregate_gpu_counts": [
+          239819.0,
+          238392.0,
+          241929.0,
+          240628.0
+        ],
+        "aggregate_skew": 1.0072317146282974,
+        "mean_per_layer_call_max": 61.70255775577558,
+        "mean_per_layer_call_skew": 1.2444979968652352
+      },
+      "cw_counterfactual": {
+        "aggregate_gpu_counts": [
+          239819.0,
+          245917.0,
+          234404.0,
+          240628.0
+        ],
+        "aggregate_skew": 1.0238350985877964,
+        "mean_per_layer_call_max": 61.63572607260726,
+        "mean_per_layer_call_skew": 1.2467719904612413
+      },
+      "full": {
+        "aggregate_gpu_counts": [
+          233894.0,
+          245917.0,
+          240329.0,
+          240628.0
+        ],
+        "aggregate_skew": 1.0238350985877964,
+        "mean_per_layer_call_max": 61.73865511551155,
+        "mean_per_layer_call_skew": 1.2449802144848632
+      }
+    },
+    "rows_le16": {
+      "native": {
+        "aggregate_gpu_counts": [
+          150641.0,
+          156366.0,
+          149737.0,
+          157656.0
+        ],
+        "aggregate_skew": 1.02640625,
+        "mean_per_layer_call_max": 39.823125,
+        "mean_per_layer_call_skew": 1.24447265625
+      },
+      "cw_counterfactual": {
+        "aggregate_gpu_counts": [
+          150641.0,
+          160900.0,
+          145203.0,
+          157656.0
+        ],
+        "aggregate_skew": 1.0475260416666667,
+        "mean_per_layer_call_max": 39.899166666666666,
+        "mean_per_layer_call_skew": 1.2468489583333333
+      },
+      "full": {
+        "aggregate_gpu_counts": [
+          147095.0,
+          160900.0,
+          148749.0,
+          157656.0
+        ],
+        "aggregate_skew": 1.0475260416666667,
+        "mean_per_layer_call_max": 39.83833333333333,
+        "mean_per_layer_call_skew": 1.2449479166666666
+      }
+    },
+    "rows_gt16": {
+      "native": {
+        "aggregate_gpu_counts": [
+          89178.0,
+          82026.0,
+          92192.0,
+          82972.0
+        ],
+        "aggregate_skew": 1.0646711012564671,
+        "mean_per_layer_call_max": 2249.6458333333335,
+        "mean_per_layer_call_skew": 1.2470320583887657
+      },
+      "cw_counterfactual": {
+        "aggregate_gpu_counts": [
+          89178.0,
+          85017.0,
+          89201.0,
+          82972.0
+        ],
+        "aggregate_skew": 1.0301298041389504,
+        "mean_per_layer_call_max": 2235.2916666666665,
+        "mean_per_layer_call_skew": 1.2390752032520325
+      },
+      "full": {
+        "aggregate_gpu_counts": [
+          86799.0,
+          85017.0,
+          91580.0,
+          82972.0
+        ],
+        "aggregate_skew": 1.0576034737620104,
+        "mean_per_layer_call_max": 2251.7708333333335,
+        "mean_per_layer_call_skew": 1.2482099963045086
+      }
+    }
+  }
+}

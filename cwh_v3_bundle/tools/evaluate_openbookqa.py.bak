@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Paired OpenBookQA 500 validation questions; identical prompt+constraint across arms."""
+import argparse
+import concurrent.futures
+import csv
+import json
+import pathlib
+import re
+import urllib.request
+from durable import append_jsonl,atomic_json,read_journal
+
+LETTER_IDS=[362,425,356,422]  # Known for the current Qwen3 tokenizer; recorded from prior runs.
+
+
+def parse_record(row):
+    gold = next((row[k] for k in ("answerKey", "answer_key", "answer", "answer_letter", "answer_label", "gold", "target", "correct", "label", "answer_index") if k in row), None)
+    if isinstance(gold, int) and 0<=gold<=3:
+        gold="ABCD"[gold]
+    gold=str(gold).strip().upper()
+    if gold not in "ABCD" or len(gold)!=1:
+        raise ValueError(f"No valid A-D answer key in row keys={sorted(row)}")
+    question=row.get("question_stem") or row.get("question") or row.get("question_text")
+    if isinstance(question,dict):
+        question=question.get("stem", question.get("text"))
+    if not isinstance(question,str):
+        raise ValueError("No question stem")
+    choices=row.get("choices",row.get("options"))
+    if isinstance(choices,dict):
+        labels=choices.get("label", choices.get("labels",[]))
+        texts=choices.get("text",choices.get("texts",[]))
+        option_map={str(label).upper():str(txt) for label,txt in zip(labels,texts)}
+        if not option_map and all(c in choices for c in "ABCD"):
+            option_map={c:str(choices[c]) for c in "ABCD"}
+    elif isinstance(choices,list):
+        option_map={}
+        for i,item in enumerate(choices):
+            if isinstance(item,dict):
+                option_map[str(item.get("label","ABCD"[i])).upper()]=str(item.get("text",item.get("value","")))
+            else:
+                option_map["ABCD"[i]]=str(item)
+    else:
+        # Some prepared JSONL files store the fully formatted task prompt.
+        full=row.get("prompt")
+        if isinstance(full,str) and len(full)>15:
+            return full,gold
+        raise ValueError("No A-D choices / preformatted prompt")
+    if not all(c in option_map for c in "ABCD"):
+        raise ValueError("Expected four A/B/C/D choices")
+    prompt=("Answer the multiple-choice science question. Choose the single best answer. "
+            "Respond with one capital letter: A, B, C or D.\n"
+            f"Question: {question}\n"+
+            "\n".join(f"{c}. {option_map[c]}" for c in "ABCD")+"\nAnswer: ")
+    return prompt,gold
+
+
+def query(url,model,index,prompt,gold,timeout):
+    payload={"model":model,"prompt":prompt,"temperature":0,"max_tokens":1,
+             "allowed_token_ids":LETTER_IDS,"stream":False,"seed":20261103,"logprobs":4}
+    req=urllib.request.Request(url+"/v1/completions",data=json.dumps(payload).encode(),
+                               headers={"Content-Type":"application/json"},method="POST")
+    try:
+        with urllib.request.urlopen(req,timeout=timeout) as response:
+            obj=json.load(response)
+        raw=obj["choices"][0]["text"]
+        pred=raw.strip().upper()
+        m=re.search(r"[ABCD]",pred)
+        pred=m.group() if m else "?"
+        lp=obj['choices'][0].get('logprobs') or {}
+        scores=(lp.get('top_logprobs') or [{}])[0]
+        return {"question_index":index,"gold":gold,"prediction":pred,
+                "correct":int(gold==pred),"error":"", "option_logprobs":json.dumps(scores,sort_keys=True)}
+    except Exception as e:
+        return {"question_index":index,"gold":gold,"prediction":"?",
+                "correct":0,"error":type(e).__name__+": "+str(e)[:180],"option_logprobs":"{}"}
+
+
+def main():
+    p=argparse.ArgumentParser()
+    p.add_argument("--dataset",required=True)
+    p.add_argument("--validate-only",action="store_true")
+    p.add_argument("--base-url",default="http://127.0.0.1:8765")
+    p.add_argument("--model",default="qwen3-moe")
+    p.add_argument("--mode",required=True)
+    p.add_argument("--workers",type=int,default=16)
+    p.add_argument("--timeout",type=int,default=90)
+    p.add_argument("--output-prefix",required=True)
+    p.add_argument('--journal',default='')
+    a=p.parse_args()
+    path=pathlib.Path(a.dataset)
+    if path.suffix==".jsonl":
+        rows=[json.loads(s) for s in path.read_text().splitlines() if s.strip()]
+    else:
+        obj=json.loads(path.read_text())
+        rows=obj.get("data",[]) if isinstance(obj,dict) else obj
+    parsed=[parse_record(row) for row in rows]
+    if len(parsed)!=500:
+        raise ValueError(f"Expected OpenBookQA validation (500 questions); got {len(parsed)} from {path}")
+    if a.validate_only:
+        print("OPENBOOKQA_SCHEMA_VALIDATED", len(parsed), "questions", flush=True)
+        return
+    journal=pathlib.Path(a.journal) if a.journal else pathlib.Path(a.output_prefix).with_suffix('.questions.jsonl')
+    saved={int(r['question_index']):r for r in read_journal(journal,repair=True) if not r.get('error')}
+    if any(i<0 or i>=len(parsed) or parsed[i][1]!=r['gold'] for i,r in saved.items()):
+        raise RuntimeError('QA journal does not match this dataset')
+    with concurrent.futures.ThreadPoolExecutor(max_workers=a.workers) as pool:
+        futures=[pool.submit(query,a.base_url,a.model,i,prompt,gold,a.timeout)
+                 for i,(prompt,gold) in enumerate(parsed) if i not in saved]
+        results=list(saved.values())
+        for future in concurrent.futures.as_completed(futures):
+            r=future.result();append_jsonl(journal,r);results.append(r)
+    results.sort(key=lambda x:x["question_index"])
+    errors=[r for r in results if r["error"]]
+    out=pathlib.Path(a.output_prefix)
+    out.parent.mkdir(parents=True,exist_ok=True)
+    with out.with_suffix(".csv").open("w",newline="") as f:
+        writer=csv.DictWriter(f,fieldnames=["question_index","gold","prediction","correct","error","option_logprobs"])
+        writer.writeheader();writer.writerows(results)
+    accuracy=sum(r["correct"] for r in results)/len(results)
+    summary={"mode":a.mode,"dataset":"OpenBookQA validation","questions":len(results),
+             "correct":sum(r["correct"] for r in results),"accuracy_pct":100*accuracy,
+             "error_count":len(errors),"evaluation_definition":"same fixed A/B/C/D prompt; allowed_token_ids and max_tokens=1",
+             "letter_token_ids":LETTER_IDS,
+             "not_a_throughput_benchmark":True}
+    atomic_json(out.with_suffix('.json'),summary)
+    print("QUALITY_RESULT",json.dumps(summary),flush=True)
+    if errors:raise SystemExit(f"Quality test has {len(errors)} HTTP errors: {errors[:3]}")
+
+if __name__=="__main__":main()

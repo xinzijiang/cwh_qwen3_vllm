@@ -1,0 +1,94 @@
+"""Version-independent, CPU-testable policy validation and weight stream aliasing."""
+import json
+import os
+import re
+from collections import Counter
+from pathlib import Path
+
+EXPERT_NAME = re.compile(
+    r"(?P<prefix>(?:^|\.)layers\.(?P<layer>\d+)\.mlp\.experts\.)(?P<expert>\d+)"
+    r"(?P<suffix>\.(?:gate_proj|up_proj|down_proj)\.weight)$"
+)
+
+
+def read_policy(path):
+    obj = json.loads(Path(path).read_text())
+    entries = obj.get("layers")
+    if not isinstance(entries, list) or len(entries) != 48:
+        raise ValueError("Qwen3-30B-A3B needs exactly 48 entries in policy['layers']")
+    policies = {}
+    for item in entries:
+        layer, cold, warm, hot = [int(item[k]) for k in ("layer", "cold", "warm", "hot")]
+        if layer in policies or not 0 <= layer < 48:
+            raise ValueError("Layer indices must be exactly 0..47 without duplicates")
+        if not (0 <= hot < 32 and 32 <= warm < 64 and 64 <= cold < 96):
+            raise ValueError("For linear EP4: H must be rank0, W rank1, C rank2")
+        if len({hot,warm,cold}) != 3:
+            raise ValueError("H/W/C must be distinct")
+        policies[layer] = dict(item)
+    if set(policies) != set(range(48)):
+        raise ValueError("Missing Qwen3 MoE layers")
+    return policies
+
+
+def remap_weights(weights, policies, audit):
+    """Replace EACH original C weight tensor with a *true* H tensor, during load.
+
+    The destination C's existing physical EP slot receives H's weights, not an
+    additional buffer. The original C weights are omitted. This does not
+    instantiate or copy a second parameter. Upstream loader owns all GPU copies.
+    Checkpoint expert naming must match Qwen3 BF16 (3 matrices / expert).
+    """
+    for name, tensor in weights:
+        match = EXPERT_NAME.search(name)
+        if match is None:
+            yield name, tensor
+            continue
+        layer, expert = int(match["layer"]), int(match["expert"])
+        if layer not in policies:
+            raise RuntimeError(f"Unexpected expert layer {layer}")
+        cfg = policies[layer]
+        if expert == int(cfg["cold"]):
+            audit[(layer,"cold_skipped")] += 1
+            continue
+        yield name, tensor
+        if expert == int(cfg["hot"]):
+            # The vLLM weight loader maps the synthetic C name into its local
+            # resident slot on EP rank 2. On other ranks, the expert map skips it.
+            new_name = (name[:match.start("expert")] + str(cfg["cold"]) +
+                        name[match.end("expert"):])
+            audit[(layer,"hot_aliased_into_c")] += 1
+            yield new_name, tensor
+
+
+def validate_audit(audit, num_layers=48):
+    for layer in range(num_layers):
+        for key in ("cold_skipped", "hot_aliased_into_c"):
+            n = audit[(layer,key)]
+            if n != 3:
+                raise RuntimeError(
+                    f"Incomplete Qwen3 BF16 weight replacement layer={layer} "
+                    f"{key}={n} != 3. Abort rather than use uninitialized weights."
+                )
+
+
+def apply_expert_redirects(topk_ids, router_logits, cold, warm, hot, *, replicate=True):
+    """Apply AFTER original top-k. Router top-k weights are unchanged.
+
+    The chosen C id is physically backed by H's real weights. Any original C
+    id is first redirected to W. A deterministic subset of H assignments goes
+    to the C slot, where an identical copy of H resides. We use a comparison
+    of two *other router logits* to shard even 1-token decode steps; all ranks
+    must see identical replicated router_logits.
+    """
+    import torch
+    original = topk_ids
+    chosen_c = original == cold
+    new_ids = torch.where(chosen_c, warm, original)
+    if replicate:
+        e = router_logits.shape[-1]
+        a, b = (hot+13)%e, (hot+37)%e
+        # Different from hot and from each other for e=128.
+        shard_mask = (router_logits[:, a] > router_logits[:, b]).unsqueeze(1)
+        new_ids = torch.where((original == hot) & shard_mask, cold, new_ids)
+    return new_ids

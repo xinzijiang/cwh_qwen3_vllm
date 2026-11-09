@@ -1,0 +1,12 @@
+{
+  "version": 3,
+  "cpu_tests_passed": 15,
+  "integer_cases": 15379,
+  "python_compile": "passed",
+  "shell_syntax": "passed",
+  "simulated_disconnect_resume": "passed",
+  "cuda_executed_locally": false,
+  "real_gpu_benchmarks_executed": false,
+  "fixed_v2_bug": "kernel factory returned undefined kernel; now returns cached _kernel",
+  "audit_revision": "3.0.1: stratified capture and padding-aware replay; CUDA not executed"
+}

@@ -1,0 +1,34 @@
+PAUSED_SAFELY simulated disconnect Repeat SAME tag and stage in another allocation.
+SKIP_COMPLETE main 16 0 native short
+SKIP_COMPLETE main 16 0 native long
+STAGE_COMPLETE main /tmp/tmp4pcwr3rk/project/runs/cwh_v4_test
+test_buckets (test_cost.CostTests.test_buckets) ... ok
+test_grid_minimum_and_conservation (test_cost.CostTests.test_grid_minimum_and_conservation) ... ok
+test_margin_rejects_small_gain (test_cost.CostTests.test_margin_rejects_small_gain) ... ok
+test_nonnegative_fit (test_cost.CostTests.test_nonnegative_fit) ... ok
+test_unicode_and_blank_replay (test_cost.CostTests.test_unicode_and_blank_replay) ... ok
+test_whole_hot_avoids_extra_activation (test_cost.CostTests.test_whole_hot_avoids_extra_activation) ... ok
+test_fixed_token_stream_and_short_output_rejected (test_cpu.HTTPTests.test_fixed_token_stream_and_short_output_rejected) ... ok
+test_aggregate_cannot_bound_per_call_bottleneck (test_cpu.PolicyTests.test_aggregate_cannot_bound_per_call_bottleneck) ... ok
+test_exact_replay_matches_oracle (test_cpu.PolicyTests.test_exact_replay_matches_oracle) ... ok
+test_general_owners_and_disabled_weight_stream (test_cpu.PolicyTests.test_general_owners_and_disabled_weight_stream) ... ok
+test_plugin_registration_metadata (test_cpu.PolicyTests.test_plugin_registration_metadata) ... ok
+test_routing_conservation_and_collisions (test_cpu.PolicyTests.test_routing_conservation_and_collisions) ... ok
+test_closed_form_exhaustive_against_integer_search (test_dynamic_resume.DynamicTests.test_closed_form_exhaustive_against_integer_search) ... ok
+test_mixed_phase_replay_matches_full_call_dispatch (test_dynamic_resume.DynamicTests.test_mixed_phase_replay_matches_full_call_dispatch) ... ok
+test_moving_bottleneck_and_guard (test_dynamic_resume.DynamicTests.test_moving_bottleneck_and_guard) ... ok
+test_static_kernel_factory_smoke_without_cuda (test_dynamic_resume.DynamicTests.test_static_kernel_factory_smoke_without_cuda) ... ok
+test_atomic_and_torn_journal_repair (test_dynamic_resume.ResumeTests.test_atomic_and_torn_journal_repair) ... ok
+test_completed_unit_hash_guard (test_dynamic_resume.ResumeTests.test_completed_unit_hash_guard) ... ok
+test_workflow_interruption_and_skip_completed_benchmarks (test_dynamic_resume.ResumeTests.test_workflow_interruption_and_skip_completed_benchmarks) ... ok
+test_selects_useful_exchange_and_rejects_validation_drift (test_optimizer.OptimizerIntegration.test_selects_useful_exchange_and_rejects_validation_drift) ... ok
+test_consistent_gain (test_replay_gate.ReplayGateTests.test_consistent_gain) ... ok
+test_missing_phase_vetoes (test_replay_gate.ReplayGateTests.test_missing_phase_vetoes) ... ok
+test_one_bad_timing_pass_vetoes (test_replay_gate.ReplayGateTests.test_one_bad_timing_pass_vetoes) ... ok
+test_third_gpu_bottleneck_vetoes (test_replay_gate.ReplayGateTests.test_third_gpu_bottleneck_vetoes) ... ok
+test_prefill_cannot_alias_with_decode_stride (test_sampling.SamplingTests.test_prefill_cannot_alias_with_decode_stride) ... ok
+
+----------------------------------------------------------------------
+Ran 25 tests in 1.127s
+
+OK
